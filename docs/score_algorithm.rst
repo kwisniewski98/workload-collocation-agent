@@ -183,7 +183,7 @@ This could be accomplished using command:
 Configuring the Score
 #####################
 
-2LM or HMEM(memory tiered) mode
+2LM or HMEM mode
 *******************************
 
 A little changes must be done to adjust the rules for **HMEM** PMEM mode. By default the rules file is
