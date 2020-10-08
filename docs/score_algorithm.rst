@@ -124,7 +124,7 @@ The score is calculated based on the metrics provided by `WCA` or `cAdvisor`.
 WCA
 ***
 For calculating Score some metrics provided by WCA agent are needed.
-File `wca-config <../examples/kubernetes/monitoring/wca/wca-config.yaml>` defines proper
+File `wca-config <../examples/kubernetes/monitoring/wca/wca-config.yaml>`_ defines proper
 configuration for defined in this file usage.
 
 ``node`` and ``metrics_storage`` should not be changed. Node is responsible for communication with the Kubernetes API,
@@ -149,7 +149,7 @@ Future work. It’s not yet fully supported.
 Prometheus rules
 ################
 
-The score algorithm is implemented as `a set of Prometheus rules <../examples/kubernetes/monitoring/prometheus/prometheus_rule.score.yaml>`_.
+The score algorithm is implemented as `a set of Prometheus rules <../examples/kubernetes/monitoring/prometheus/prometheus_rule.score.yaml>`_ .
 
 Configuring the Prometheus
 **************************
@@ -240,7 +240,8 @@ Please use Prometheus query to list potential candidates (those with smaller val
 Grafana dashboard
 #################
 
-We prepared Grafana dashboard `graphana dashboard <../examples/kubernetes/monitoring/grafana/2lm_dashboards/2lm_score_dashboard.yaml>`_
+We prepared Grafana dashboard `grafana dashboard <../examples/kubernetes/monitoring/grafana/2lm_dashboards/2lm_score_dashboard.json>`_
+
 for visualization of the results mentioned in `Scores for our testing workloads`_.
 The dashboard requires Grafana with `boom table plugin <https://grafana.com/grafana/plugins/yesoreyeram-boomtable-panel>`_.
 
