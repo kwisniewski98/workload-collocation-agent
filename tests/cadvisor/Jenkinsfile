@@ -16,48 +16,69 @@ pipeline {
     agent any
     environment {
         CADVISOR_IMAGE = "cadvisor"
-        CADVISOR_PORT = 8081
+        CADVISOR_PORT = 8080
         WCA_DIR = "workload-collocation-agent"
+        CADVISOR_CONTAINER_NAME = "cadvisor_container"
+        CADVISOR_LOGS_FILE = "cadvisor_logs.txt"
     }
     parameters{
         string(name: 'WCA_URL', defaultValue: 'https://github.com/kwisniewski98/workload-collocation-agent')
+        string(name: 'REQUIREMENTS_FILE', defaultValue: 'workload-collocation-agent/tests/cadvisor/requirements.txt')
+
     }
     stages {
         stage('Build') {
             steps {
-                sh "git clone ${params.WCA_URL}"
-                sh "docker build -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
+                    sh "git clone ${params.WCA_URL}"
+                    sh "docker build -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
+
             }
         }
         stage('Deploy') {
             steps {
-                sh "env CADVISOR_CONTAINER_ID=$(docker run -d -p 8080:${CADVISOR_PORT} --entrypoint `/usr/bin/cadvisor ${5}logtostderr' ${CADVISOR_IMAGE})"
-                wait_for_cadvisor()
+                sh '''
+                sudo docker run -p ${CADVISOR_PORT}:8080 --entrypoint \
+                 '/usr/bin/cadvisor' \
+                 --name ${CADVISOR_CONTAINER_NAME} \
+                 --volume=/:/rootfs:ro \
+                 --volume=/var/run:/var/run:ro \
+                 --volume=/sys:/sys:ro \
+                 --volume=/var/lib/docker/:/var/lib/docker:ro \
+                 --volume=/dev/disk/:/dev/disk:ro \
+                 --privileged \
+                 --volume=${WORKSPACE}/${WCA_DIR}/tests/cadvisor/perf.json:/perf.json:ro \
+                  ${CADVISOR_IMAGE} '-perf_events_config=/perf.json' >> ${CADVISOR_LOGS_FILE} & '''
+
             }
         }
-        stage('Test'){
+        stage('Test') {
             steps {
-                 sh "make venv; source env/bin/activate && \
-                        pytest ${WORKSPACE}/tests/test_cadvisor_perf.py::test_perf --junitxml=unit_results.xml --log-level=debug --log-cli-level=debug -v && \
+                wait_for_cadvisor()
+                sh "python3.6 -m venv env; source env/bin/activate; pip install -r ${REQUIREMENTS_FILE} && \
+                        pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_perf --junitxml=unit_results.xml --log-level=debug --log-cli-level=debug -v && \
                         deactivate"
-
-                }
             }
         }
     }
     post {
         always {
-            sh "rm -rf *"
-            sh "[[ -z '$CADVISOR_CONTAINER_ID' ]] || docker kill $CADVISOR_CONTAINER_ID"
+            script{
+                sh "sudo docker stop ${CADVISOR_CONTAINER_NAME} || true && sudo docker rm ${CADVISOR_CONTAINER_NAME} || true"
+                if (fileExists('${CADVISOR_LOGS_FILE}')){
+                    sh "cat ${CADVISOR_LOGS_FILE}"
+                    archiveArtifacts artifacts: '${CADVISOR_LOGS_FILE}'
+                }
+                sh "rm -rf *"
+            }
         }
+
+
     }
 }
-
 def wait_for_cadvisor() {
     def count = 1
     while(count <= 15) {
-        sh(script: "curl localhost:${CADVISOR_PORT}")
-        check_image = sh(script: "$?", returnStdout: true).trim()
+        check_image = sh(script: "curl localhost:${CADVISOR_PORT}/api/v1.3", returnStatus:true)
         if (check_image == '0') {
             print("cadvisor is running")
             break
@@ -67,3 +88,5 @@ def wait_for_cadvisor() {
         count++
     }
 }
+
+

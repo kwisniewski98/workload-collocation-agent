@@ -19,12 +19,14 @@ import os
 import requests
 import json
 
-EXPECTED_PERF_METRICS = ["cycles", "instructions", "instructions_retired"]
+EXPECTED_PERF_METRICS = ["cycles", "instructions",
+                         "instructions_retired"]
+EXPECTED_PERF_METRICS.sort()
+
 
 def test_perf():
     cadvisor_port = os.environ.get("CADVISOR_PORT")
-    cadvisor_port = 8080
-    resp = requests.get(f"http://localhost:{cadvisor_port}/api/v1.3/containers")
+    resp = requests.get(f"http://127.0.0.1:{cadvisor_port}/api/v1.3/containers")
     stats = json.loads(resp.content)
     perf_stats = stats["stats"][0]["perf_stats"]
     assert perf_stats
