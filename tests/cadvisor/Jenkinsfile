@@ -1,0 +1,69 @@
+// Copyright (c) 2020 Intel Corporation
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+pipeline {
+    agent any
+    environment {
+        CADVISOR_IMAGE = "cadvisor"
+        CADVISOR_PORT = 8081
+        WCA_DIR = "workload-collocation-agent"
+    }
+    parameters{
+        string(name: 'WCA_URL', defaultValue: 'https://github.com/kwisniewski98/workload-collocation-agent/tree/cadvisor_tests')
+    }
+    stages {
+        stage('Build') {
+            steps {
+                sh "git clone ${params.WCA_URL}"
+                sh "docker build -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
+            }
+        }
+        stage('Deploy') {
+            steps {
+                sh "env CADVISOR_CONTAINER_ID=$(docker run -d -p 8080:${CADVISOR_PORT} --entrypoint `/usr/bin/cadvisor -logtostderr' ${CADVISOR_IMAGE})"
+                wait_for_cadvisor()
+            }
+        }
+        stage('Test'){
+            steps {
+                 sh "make venv; source env/bin/activate && \
+                        pytest ${WORKSPACE}/tests/test_cadvisor_perf.py::test_perf --junitxml=unit_results.xml --log-level=debug --log-cli-level=debug -v && \
+                        deactivate"
+
+                }
+            }
+        }
+    }
+    post {
+        always {
+            sh "rm -rf *"
+            sh "[[ -z '$CADVISOR_CONTAINER_ID' ]] || docker kill $CADVISOR_CONTAINER_ID"
+        }
+    }
+}
+
+def wait_for_cadvisor() {
+    def count = 1
+    while(count <= 15) {
+        sh(script: "curl localhost:${CADVISOR_PORT}")
+        check_image = sh(script: "$?", returnStdout: true).trim()
+        if (check_image == '0') {
+            print("cadvisor is running")
+            break
+        }
+        echo "Attempt $count. Sleeping for 1 second..."
+        sleep(1)
+        count++
+    }
+}
