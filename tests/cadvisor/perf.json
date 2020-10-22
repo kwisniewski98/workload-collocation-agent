@@ -2,6 +2,7 @@
   "core": {
     "events": [
       ["instructions", "instructions_retired"],
+      "offcore_requests.demand_data_rd",
       "cycles"
     ],
     "custom_events": [

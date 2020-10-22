@@ -12,14 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+
+
+// nazwa kontenera
+// venv
+
 pipeline {
     agent any
     environment {
         CADVISOR_IMAGE = "cadvisor"
         CADVISOR_PORT = 8080
         WCA_DIR = "workload-collocation-agent"
-        CADVISOR_CONTAINER_NAME = "cadvisor_container"
         CADVISOR_LOGS_FILE = "cadvisor_logs.txt"
+        BENCH_CONTAINER_NAME = "pmbench_container"
+        TEST_IMAGE_NAME = "pmbench"
+        TEST_LENGTH  = 90
+        CADVISOR_CONTAINER_NAME = "cadvisor_container"
+
     }
     parameters{
         string(name: 'WCA_URL', defaultValue: 'https://github.com/kwisniewski98/workload-collocation-agent')
@@ -31,14 +40,22 @@ pipeline {
             steps {
                     sh "git clone ${params.WCA_URL}"
                     sh "docker build -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
-
+                    sh "python3.6 -m venv env; source env/bin/activate; pip install -r ${REQUIREMENTS_FILE}"
+            }
+        }
+    // pmbench
+        stage("Build pmbench Docker image") {
+            steps {
+                sh '''
+                IMAGE_DIR=${WORKSPACE}/${WCA_DIR}/examples/workloads/pmbench
+                docker build -t ${TEST_IMAGE_NAME} -f ${IMAGE_DIR}/Dockerfile ${IMAGE_DIR}
+                '''
             }
         }
         stage('Deploy') {
             steps {
                 sh '''
-                sudo docker run -p ${CADVISOR_PORT}:8080 --entrypoint \
-                 '/usr/bin/cadvisor' \
+                sudo docker run -p ${CADVISOR_PORT}:8080 \
                  --name ${CADVISOR_CONTAINER_NAME} \
                  --volume=/:/rootfs:ro \
                  --volume=/var/run:/var/run:ro \
@@ -48,15 +65,41 @@ pipeline {
                  --privileged \
                  --volume=${WORKSPACE}/${WCA_DIR}/tests/cadvisor/perf.json:/perf.json:ro \
                   ${CADVISOR_IMAGE} '-perf_events_config=/perf.json' >> ${CADVISOR_LOGS_FILE} & '''
-
+                  wait_for_cadvisor()
             }
         }
-        stage('Test') {
+        stage('Run pmbench') {
+            parallel{
+                    stage("Running pmbench"){
+                        steps {
+//                            sh '''
+//                     perf stat -e cycles  -x , \
+//                     docker run --name=${BENCH_CONTAINER_NAME} ${TEST_IMAGE_NAME} ./pmbench ${TEST_LENGTH}  2> perf_result.txt
+//                     '''
+                            sh '''
+                            docker run --name=${BENCH_CONTAINER_NAME} ${TEST_IMAGE_NAME} ./pmbench ${TEST_LENGTH}
+                            '''
+                        }
+                    }
+                    stage("Getting pmbench container id"){
+                        steps{
+                            wait_for_container_id("$BENCH_CONTAINER_NAME")
+                            sh 'sudo docker ps --no-trunc -aqf "name=${BENCH_CONTAINER_NAME}" > pmbench_container_id.txt'
+                            sh 'sleep 2'
+                            sh 'sudo perf stat -e cycles -x , --cgroup=docker/$(cat pmbench_container_id.txt) -a sleep ${TEST_LENGTH} 2> perf_result.txt'
+                        }
+                    }
+                }
+                post {
+                    always {
+                        sh "sudo docker stop ${BENCH_CONTAINER_NAME} || true && sudo docker rm ${BENCH_CONTAINER_NAME} || true"
+                    }
+                }
+            }
+        stage("Test perf"){
             steps {
-                wait_for_cadvisor()
-                sh "python3.6 -m venv env; source env/bin/activate; pip install -r ${REQUIREMENTS_FILE} && \
-                        pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_perf --junitxml=unit_results.xml --log-level=debug --log-cli-level=debug -v && \
-                        deactivate"
+                sh 'date +"%s" > perf_ending_timestamp.txt'
+                sh 'source env/bin/activate; pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_perf_run --log-level=debug --log-cli-level=debug -v'
             }
         }
     }
@@ -64,9 +107,8 @@ pipeline {
         always {
             script{
                 sh "sudo docker stop ${CADVISOR_CONTAINER_NAME} || true && sudo docker rm ${CADVISOR_CONTAINER_NAME} || true"
-                if (fileExists('${CADVISOR_LOGS_FILE}')){
+                if (fileExists("${CADVISOR_LOGS_FILE}")){
                     sh "cat ${CADVISOR_LOGS_FILE}"
-                    archiveArtifacts artifacts: '${CADVISOR_LOGS_FILE}'
                 }
                 sh "rm -rf *"
             }
@@ -75,18 +117,23 @@ pipeline {
 
     }
 }
+def wait_for_container_id(String container_name){
+    while(sh(script: "sudo docker ps -aqf 'name=${container_name}'", returnStdout: true).trim() == "") {
+        sh "sleep 0.5"
+    }
+}
+
 def wait_for_cadvisor() {
     def count = 1
     while(count <= 15) {
         check_image = sh(script: "curl localhost:${CADVISOR_PORT}/api/v1.3", returnStatus:true)
-        if (check_image == '0') {
+        if (check_image == 0) {
             print("cadvisor is running")
-            break
+            return
         }
         echo "Attempt $count. Sleeping for 1 second..."
         sleep(1)
         count++
     }
+    throw error("cadvisor could not start running")
 }
-
-
