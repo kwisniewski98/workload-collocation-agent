@@ -1,8 +1,8 @@
 {
   "core": {
     "events": [
-      ["instructions", "instructions_retired"],
-      "offcore_requests.demand_data_rd",
+      "instructions",
+      "instructions_retired",
       "cycles"
     ],
     "custom_events": [
@@ -25,7 +25,7 @@
       {
         "type": 18,
         "config": [
-          "0x5300"
+          "0xc04"
         ],
         "name": "cas_count_write"
       }

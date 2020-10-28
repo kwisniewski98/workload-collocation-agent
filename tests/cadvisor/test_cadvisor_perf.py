@@ -20,10 +20,15 @@ import requests
 from datetime import datetime, timedelta
 import csv
 from io import StringIO
+from pytest import mark
 
 CADVISOR_TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%S.%f"
-EXPECTED_PERF_METRICS = ["cycles"]
-
+EXPECTED_PERF_METRICS = {
+    "cycles": "cycles",
+    "instructions": "instructions",
+    "instructions_retired": "cpu/config=0x5300c0/",
+}
+ERROR_TOLERATION = 0.2
 #
 # def test_perf_api():
 #     cadvisor_port = os.environ.get("CADVISOR_PORT")
@@ -40,7 +45,8 @@ EXPECTED_PERF_METRICS = ["cycles"]
 #
 
 
-def test_perf_run():
+@mark.parametrize("metric", EXPECTED_PERF_METRICS.keys())
+def test_perf_run(metric):
     cadvisor_port = os.environ.get("CADVISOR_PORT")
     with open("pmbench_container_id.txt") as f:
         cgroup = f.read().strip("\n")
@@ -80,12 +86,18 @@ def test_perf_run():
     ):
         stats = container_stats[selected_stats_index]
     else:
-        stats = container_stats[selected_stats_index-1]
+        stats = container_stats[selected_stats_index - 1]
     assert stats
     perf_output = parse_perf_output(perf_results)
-    for metric in EXPECTED_PERF_METRICS:
-        cadvisor_perf_value = sum([float(stat["value"]) for stat in stats["perf_stats"] if stat["name"] == metric])
-        assert cadvisor_perf_value * 0.95 < float(perf_output[metric]) < cadvisor_perf_value * 1.05
+    cadvisor_perf_value = sum(
+        [float(stat["value"]) for stat in stats["perf_stats"] if stat["name"] == metric]
+    )
+    perf_value = float(perf_output[EXPECTED_PERF_METRICS[metric]])
+    assert (
+        perf_value * (1-ERROR_TOLERATION)
+        < cadvisor_perf_value
+        < perf_value * (1+ERROR_TOLERATION)
+    )
 
 
 def parse_perf_output(output: str) -> map:

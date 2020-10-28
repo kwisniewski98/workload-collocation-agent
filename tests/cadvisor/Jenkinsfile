@@ -86,7 +86,7 @@ pipeline {
                             wait_for_container_id("$BENCH_CONTAINER_NAME")
                             sh 'sudo docker ps --no-trunc -aqf "name=${BENCH_CONTAINER_NAME}" > pmbench_container_id.txt'
                             sh 'sleep 2'
-                            sh 'sudo perf stat -e cycles -x , --cgroup=docker/$(cat pmbench_container_id.txt) -a sleep ${TEST_LENGTH} 2> perf_result.txt'
+                            sh 'sudo perf stat -e cycles,instructions,cpu/config=0x5300c0/ -x , --cgroup=docker/$(cat pmbench_container_id.txt) -a sleep ${TEST_LENGTH} 2> perf_result.txt'
                         }
                     }
                 }
