@@ -21,28 +21,86 @@ pipeline {
         WCA_DIR = "workload-collocation-agent"
         CADVISOR_LOGS_FILE = "cadvisor_logs.txt"
         PMBENCH_CONTAINER_NAME = "pmbench_container"
-        TEST_LENGTH  = 90
+        PAUSE_BETWEEN_CONTAINERS_STARTUP = 5
         CADVISOR_CONTAINER_NAME = "cadvisor_container"
         PROXY_ADDRESS = "proxy-mu.intel.com:911"
+        USE_CONTROL_GROUP = "True"
+        GROUP_NAME = "test_group"
 
     }
     parameters{
         string(name: 'WCA_URL', defaultValue: 'https://github.com/intel/workload-collocation-agent')
         string(name: 'REQUIREMENTS_FILE', defaultValue: 'workload-collocation-agent/tests/cadvisor/requirements.txt')
         string(name: 'PMBENCH_IMAGE', defaultValue: '100.64.176.12:80/wca/pmbench:master')
+        string(name: 'TEST_LENGTH', defaultValue: '90')
+
     }
     stages {
-        stage('Build cadvisor and run pmbench') {
-            steps {
-                    sh "git clone ${params.WCA_URL}"
-                    sh "sudo docker build --network=host -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
-                    sh "sudo docker run --name=${PMBENCH_CONTAINER_NAME} --cidfile=pmbench_container_id.txt ${params.PMBENCH_IMAGE} ./pmbench ${TEST_LENGTH} & "
+        stage("Test perf") {
+            stages {
+               // Test perf
+                stage('Build cadvisor and run pmbench') {
+                    steps {
+                            sh "git clone ${params.WCA_URL}"
+                            sh "sudo docker build --network=host -t ${CADVISOR_IMAGE} -f deploy/Dockerfile ${WORKSPACE}"
+                            sh "sudo docker run --name=${PMBENCH_CONTAINER_NAME} --cidfile=pmbench_container_id.txt ${params.PMBENCH_IMAGE} ./pmbench ${params.TEST_LENGTH} & "
+                    }
+                }
+                stage('Deploy cadvisor and run perf stat') {
+                    parallel{
+                        stage('Deploy cadvisor') {
+                            steps {
+                                sh '''
+                                sudo docker run -p ${CADVISOR_PORT}:8080 \
+                                 --name ${CADVISOR_CONTAINER_NAME} \
+                                 --volume=/:/rootfs:ro \
+                                 --volume=/var/run:/var/run:ro \
+                                 --volume=/sys:/sys:ro \
+                                 --volume=/var/lib/docker/:/var/lib/docker:ro \
+                                 --volume=/dev/disk/:/dev/disk:ro \
+                                 --privileged \
+                                 --volume=${WORKSPACE}/${WCA_DIR}/tests/cadvisor/perf.json:/perf.json:ro \
+                                  ${CADVISOR_IMAGE} -housekeeping_interval=3s  -v 4  '-perf_events_config=/perf.json' >> ${CADVISOR_LOGS_FILE} & '''
+                            }
+                        }
+                            stage("Run perf stat"){
+                                steps{
+                                    wait_for_container_id("$PMBENCH_CONTAINER_NAME")
+                                    sh "sleep 1"
+                                    sh "sudo perf stat -e cycles,instructions,cpu/config=0x5300c0/ -x , --cgroup=docker/\$(cat pmbench_container_id.txt) -o core.csv -a sleep ${TEST_LENGTH} &"
+                                    sh "sudo perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_0/config=0xc04/ -x , -o uncore.csv -a sleep ${params.TEST_LENGTH}"
+
+                                }
+                            }
+                        }
+                    }
+                stage("Check results"){
+                    steps {
+                        sh "date +'%s' > perf_ending_timestamp.txt"
+                        sh "python3.6 -m venv env; source env/bin/activate; pip install -r ${params.REQUIREMENTS_FILE}"
+                        sh "source env/bin/activate; pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_core_perf --log-level=debug --log-cli-level=debug -v && \
+                        pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_uncore_perf --log-level=debug --log-cli-level=debug -v "
+                    }
+                }
+                stage("Stop cadvisor and pmbench"){
+                    steps {
+                        sh "sudo docker stop ${CADVISOR_CONTAINER_NAME} || true && sudo docker rm ${CADVISOR_CONTAINER_NAME} || true"
+                        sh "sudo docker stop ${PMBENCH_CONTAINER_NAME} || true && sudo docker rm ${PMBENCH_CONTAINER_NAME} || true"
+                    }
+                }
             }
         }
-        stage('Deploy cadvisor and run perf stat') {
-            parallel{
-                stage('Deploy cadvisor') {
-                    steps {
+
+        stage("Test RDT container first"){
+            stages {
+                stage("Create test container") {
+                    steps{
+                        sh "sudo docker run --name=${PMBENCH_CONTAINER_NAME} --cidfile=pmbench_container_id_rdt.txt ${params.PMBENCH_IMAGE} ./pmbench '${params.TEST_LENGTH} && sleep 10000' & "
+                        sh "sleep ${PAUSE_BETWEEN_CONTAINERS_STARTUP}"
+                    }
+                }
+                 stage("Deploy cadvisor"){
+                    steps{
                         sh '''
                         sudo docker run -p ${CADVISOR_PORT}:8080 \
                          --name ${CADVISOR_CONTAINER_NAME} \
@@ -51,28 +109,121 @@ pipeline {
                          --volume=/sys:/sys:ro \
                          --volume=/var/lib/docker/:/var/lib/docker:ro \
                          --volume=/dev/disk/:/dev/disk:ro \
+                         --pid=host \
                          --privileged \
-                         --volume=${WORKSPACE}/${WCA_DIR}/tests/cadvisor/perf.json:/perf.json:ro \
-                          ${CADVISOR_IMAGE} -housekeeping_interval=3s  -v 4  '-perf_events_config=/perf.json' >> ${CADVISOR_LOGS_FILE} & '''
+                          ${CADVISOR_IMAGE} -resctrl_interval 1s  -v 4  \
+                          -disable_metrics referenced_memory,memory_numa,tcp,udp,advtcp,process,sched,hugetlb,cpu_topology >> ${CADVISOR_LOGS_FILE} & '''
                     }
                 }
-                    stage("Run perf stat"){
-                        steps{
-                            wait_for_container_id("$PMBENCH_CONTAINER_NAME")
-                            sh "sleep 1"
-                            sh "sudo perf stat -e cycles,instructions,cpu/config=0x5300c0/ -x , --cgroup=docker/\$(cat pmbench_container_id.txt) -o core.csv -a sleep ${TEST_LENGTH} &"
-                            sh "sudo perf stat -e uncore_imc_0/cas_count_read/,uncore_imc_0/config=0xc04/ -x , -o uncore.csv -a sleep ${TEST_LENGTH}"
-
-                        }
+                stage("Wait for test to end"){
+                    steps {
+                        // Subtract 5 second to compare results when pmbench is still running
+                        sleep params.TEST_LENGTH.toInteger() - PAUSE_BETWEEN_CONTAINERS_STARTUP.toInteger() -  5
+                    }
+                }
+                stage("Check results"){
+                    steps{
+                        sh "source env/bin/activate; pytest ${WCA_DIR}/tests/cadvisor/test_cadvisor_rdt.py::test_rdt_mb --log-level=debug --log-cli-level=debug -v "
+                    }
+                }
+                stage("Cleanup"){
+                    steps{
+                        sh "sudo docker stop ${CADVISOR_CONTAINER_NAME} || true && sudo docker rm ${CADVISOR_CONTAINER_NAME} || true"
+                        sh "sudo docker stop ${PMBENCH_CONTAINER_NAME} || true && sudo docker rm ${PMBENCH_CONTAINER_NAME} || true"
+                        sh "rm pmbench_container_id_rdt.txt"
                     }
                 }
             }
-        stage("Test perf"){
-            steps {
-                sh "date +'%s' > perf_ending_timestamp.txt"
-                sh "python3.6 -m venv env; source env/bin/activate; pip install -r ${params.REQUIREMENTS_FILE}"
-                sh "source env/bin/activate; pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_core_perf --log-level=debug --log-cli-level=debug -v && \
-                pytest ${WORKSPACE}/${WCA_DIR}/tests/cadvisor/test_cadvisor_perf.py::test_uncore_perf --log-level=debug --log-cli-level=debug -v "
+        }
+        stage("Test RDT cadvisor first"){
+            stages{
+                 stage("Deploy cadvisor"){
+                    steps{
+                        sh '''
+                        sudo docker run -p ${CADVISOR_PORT}:8080 \
+                         --name ${CADVISOR_CONTAINER_NAME} \
+                         --volume=/:/rootfs:ro \
+                         --volume=/var/run:/var/run:ro \
+                         --volume=/sys:/sys:ro \
+                         --volume=/var/lib/docker/:/var/lib/docker:ro \
+                         --volume=/dev/disk/:/dev/disk:ro \
+                         --pid=host \
+                         --privileged \
+                          ${CADVISOR_IMAGE} -resctrl_interval 1s  -v 4  \
+                          -disable_metrics referenced_memory,memory_numa,tcp,udp,advtcp,process,sched,hugetlb,cpu_topology >> ${CADVISOR_LOGS_FILE} & '''
+                    }
+                }
+                stage("Create test container") {
+                    steps{
+                        sh "sudo docker run --name=${PMBENCH_CONTAINER_NAME} --cidfile=pmbench_container_id_rdt.txt ${params.PMBENCH_IMAGE} ./pmbench '${params.TEST_LENGTH} && sleep 10000' & "
+                        sh "sleep ${PAUSE_BETWEEN_CONTAINERS_STARTUP}"
+                    }
+                }
+                stage("Wait for test to end"){
+                    steps {
+                          // Subtract 5 second to compare results when pmbench is still running
+                          sleep params.TEST_LENGTH.toInteger() - PAUSE_BETWEEN_CONTAINERS_STARTUP.toInteger() - 5
+                    }
+                }
+                stage("Check results"){
+                    steps{
+                        sh "source env/bin/activate; pytest ${WCA_DIR}/tests/cadvisor/test_cadvisor_rdt.py::test_rdt_mb --log-level=debug --log-cli-level=debug -v "
+                    }
+                }
+                stage("Cleanup"){
+                    steps{
+                        sh "sudo docker stop ${CADVISOR_CONTAINER_NAME} || true && sudo docker rm ${CADVISOR_CONTAINER_NAME} || true"
+                        sh "sudo docker stop ${PMBENCH_CONTAINER_NAME} || true && sudo docker rm ${PMBENCH_CONTAINER_NAME} || true"
+                        sh "rm pmbench_container_id_rdt.txt"
+                    }
+                }
+            }
+        }
+         stage("Test RDT change control group"){
+            stages{
+                stage("Create test container") {
+                    steps{
+                        sh "sudo docker run --name=${PMBENCH_CONTAINER_NAME} --cidfile=pmbench_container_id_rdt.txt ${params.PMBENCH_IMAGE} ./pmbench '${params.TEST_LENGTH} && sleep 10000' & "
+                        sh "sleep ${PAUSE_BETWEEN_CONTAINERS_STARTUP}"
+                    }
+                }
+                 stage("Deploy cadvisor"){
+                    steps{
+                        sh '''
+                        sudo docker run -p ${CADVISOR_PORT}:8080 \
+                         --name ${CADVISOR_CONTAINER_NAME} \
+                         --volume=/:/rootfs:ro \
+                         --volume=/var/run:/var/run:ro \
+                         --volume=/sys:/sys:ro \
+                         --volume=/var/lib/docker/:/var/lib/docker:ro \
+                         --volume=/dev/disk/:/dev/disk:ro \
+                         --pid=host \
+                         --privileged \
+                          ${CADVISOR_IMAGE} -resctrl_interval 1s  -v 4  \
+                          -disable_metrics referenced_memory,memory_numa,tcp,udp,advtcp,process,sched,hugetlb,cpu_topology >> ${CADVISOR_LOGS_FILE} & '''
+                    }
+                }
+                stage("Run half of test"){
+                    steps {
+                        sleep_half_of_test()
+                    }
+                }
+                stage("Change control group of container"){
+                    steps {
+                        change_control_group()
+                    }
+                }
+                stage("Run second half of test"){
+                    steps {
+                        sleep_half_of_test()
+                    }
+                }
+                stage("Check results"){
+                    steps{
+                        sh "export USE_CONTROL_GROUP=False"
+                        sh "source env/bin/activate; pytest ${WCA_DIR}/tests/cadvisor/test_cadvisor_rdt.py::test_rdt_mb  --log-level=debug --log-cli-level=debug -v "
+                    }
+                }
             }
         }
     }
@@ -91,6 +242,22 @@ pipeline {
 
     }
 }
+
+def sleep_half_of_test() {
+    // Subtract 5 second to compare results when pmbench is still running
+    sleep ((params.TEST_LENGTH.toInteger() - PAUSE_BETWEEN_CONTAINERS_STARTUP.toInteger() - 5) / 2)
+}
+
+
+def change_control_group(){
+    cgroup = sh(script: "cat pmbench_container_id_rdt.txt", returnStdout: true).trim()
+    pid = sh(script: "docker inspect -f '{{.State.Pid}}' ${cgroup}", returnStdout: true).trim()
+    if (!fileExists("/sys/fs/resctrl/${GROUP_NAME}")){
+        sh "sudo mkdir /sys/fs/resctrl/${GROUP_NAME}"
+    }
+    sh "sudo sh -c 'echo ${pid} > /sys/fs/resctrl/${GROUP_NAME}/tasks'"
+}
+
 def wait_for_container_id(String container_name){
     while(sh(script: "sudo docker ps -aqf 'name=${container_name}'", returnStdout: true).trim() == "") {
         sh "sleep 0.5"
